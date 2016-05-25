@@ -1,0 +1,168 @@
+#include <winsock2.h>
+#include <iostream>
+#include <tchar.h>
+#pragma comment(lib,"ws2_32.lib")
+/*
+WSAAsyncSelect模型，WSA消息模型
+*/
+//定义我们自己的SOCKET消息
+#define WM_SOCKET WM_USER+1001
+//窗口回调函数
+LRESULT CALLBACK WinProc(HWND hwnd,UINT uMsg,WPARAM,LPARAM);
+//字符串转换为LPCWSTR
+LPCWSTR  StringtoLPCWSTR(const std::string& s)
+{
+	int len;
+	int slength = (int)s.length() + 1;
+	len = MultiByteToWideChar(CP_ACP, 0, s.c_str(), slength, 0, 0); 
+	wchar_t* buf = new wchar_t[len];
+	MultiByteToWideChar(CP_ACP, 0, s.c_str(), slength, buf, len);
+	std::wstring r(buf);
+	delete[] buf;
+	return r.c_str();
+}
+int WINAPI WinMain(HINSTANCE hInstance,HINSTANCE hPrevInstance,LPSTR lpCmdLine,int nShowCmd){
+
+	//创建窗口，这里就不多说了
+	WNDCLASS wc;
+	wc.cbClsExtra=0;
+	wc.cbWndExtra=0;
+	wc.hbrBackground=(HBRUSH)GetStockObject(WHITE_BRUSH);
+	wc.hCursor=LoadCursor(hInstance,IDC_ARROW);
+	wc.hIcon=LoadIcon(hInstance,IDI_EXCLAMATION);
+	wc.hInstance=hInstance;
+	wc.lpfnWndProc=WinProc;
+	wc.lpszClassName=StringtoLPCWSTR("My_Class");
+	wc.lpszMenuName=NULL;
+	wc.style=CS_HREDRAW | CS_VREDRAW;
+	RegisterClass(&wc);
+	HWND hwnd=CreateWindow(StringtoLPCWSTR("My_Class"),StringtoLPCWSTR("WSA消息"),WS_SYSMENU,300,300,300,300,NULL,NULL,hInstance,NULL);
+	ShowWindow(hwnd,nShowCmd);
+	UpdateWindow(hwnd);
+
+	//初始化套接字
+	WSADATA wsaData;
+	WSAStartup(MAKEWORD(2,2),&wsaData);
+
+	//创建套接字
+	SOCKET s=socket(AF_INET,SOCK_STREAM,0);
+	SOCKADDR_IN local;
+	local.sin_addr.S_un.S_addr=INADDR_ANY;
+	local.sin_family=AF_INET;
+	local.sin_port=htons(6000);
+
+	//绑定监听
+	bind(s,(SOCKADDR*)&local,sizeof(SOCKADDR));
+	listen(s,5);
+
+	//将监听套接字和自定义的消息进行绑定，并关注连接到来消息
+	WSAAsyncSelect(s,hwnd,WM_SOCKET,FD_ACCEPT);
+
+	//消息循环
+	MSG msg;
+	while(GetMessage(&msg,0,0,0)){
+		TranslateMessage(&msg);
+		DispatchMessage(&msg);
+	}
+	closesocket(s);
+	WSACleanup();
+	return msg.wParam;
+}
+//回调函数
+LRESULT CALLBACK WinProc(HWND hwnd,UINT uMsg,WPARAM wParam,LPARAM lParam){
+
+	//判断消息类型
+	switch(uMsg){
+
+		//我们自定义的SOCKET消息
+	case WM_SOCKET:
+		{
+			//wParam参数是套接字句柄
+			SOCKET ss=wParam;
+
+			//lParam的高字节为可能出现的错误代码，这里使用WSAGETSELECTERROR宏进行判断
+			if(WSAGETSELECTERROR(lParam)){
+				closesocket(ss);
+				return 0;
+			}
+
+			//不是错误代码，然后使用WSAGETSELECTEVENT宏判断发生的网络事件
+			switch(WSAGETSELECTEVENT(lParam)){
+
+				//ACCEPT网络事件
+			case FD_ACCEPT:
+				{
+					SOCKADDR_IN client;
+					int client_len=sizeof(SOCKADDR);
+					SOCKET sClient=accept(ss,(SOCKADDR*)&client,&client_len);
+					//错误处理
+					if(sClient==INVALID_SOCKET){
+						MessageBox(hwnd,StringtoLPCWSTR("accept fun is error"),StringtoLPCWSTR("Error"),MB_OK);
+					}
+					//将接收的套接字继续与窗口关联起来，并关注可读与关闭套接字事件
+					WSAAsyncSelect(sClient,hwnd,WM_SOCKET,FD_READ | FD_CLOSE);
+				}
+				break;
+				//读取消息
+			case FD_READ:
+				{
+					char recvbuf[1024]={0};
+					//接收消息
+					int cRecv=recv(ss,recvbuf,1024,0);
+
+					//错误处理
+					if((cRecv==SOCKET_ERROR && WSAGetLastError()==WSAECONNRESET) || cRecv==0){
+
+						MessageBox(hwnd,_T("recv fun is error"),_T("Error"),MB_OK);
+						closesocket(ss);
+					}
+					//没有发生错误
+					else if(cRecv>0){
+
+						char blank[1024];
+						memset(blank,' ',sizeof(blank));
+						//获取设备环境句柄
+						HDC dc=GetDC(hwnd);
+						//这步是将之前写在窗口上的数据给清空，因对windows绘图不熟悉，这里方法比较拙略
+						TextOut(dc,10,10,StringtoLPCWSTR(blank),1023);
+						//在窗口上写入获取到的消息
+						TextOut(dc,10,10,StringtoLPCWSTR(recvbuf),strlen(recvbuf));
+						//释放设备环境句柄
+						ReleaseDC(hwnd,dc);
+						//向客户端发送消息表示我们获取到了消息
+						char sendbuf[]="Get Message Success";
+						int issend=send(ss,sendbuf,sizeof(sendbuf),0);
+						//判断是否发送消息错误
+						if(issend==SOCKET_ERROR || issend<0){
+							MessageBox(hwnd,StringtoLPCWSTR("Send Message Error"),StringtoLPCWSTR("Error"),MB_OK);
+						}
+					} 
+				}
+				break;
+				//套接字关闭
+			case FD_CLOSE:
+				{
+					//关闭套接字
+					closesocket(ss);
+					break;
+				}
+			}
+			break;
+		}
+		//窗口关闭消息
+	case WM_CLOSE:
+		{
+			DestroyWindow(hwnd);
+		}
+		break;
+		//窗口销毁消息
+	case WM_DESTROY:
+		{
+			PostQuitMessage(0);
+		}
+		break;
+	default:
+		return DefWindowProc(hwnd,uMsg,wParam,lParam);
+	}
+	return 0;
+}
