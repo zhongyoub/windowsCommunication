@@ -1,0 +1,132 @@
+#include<iostream>
+#include<WinSock2.h>
+#pragma  comment(lib,"ws2_32.lib")
+#define PORT 6000
+#define MSGSIZE 1024
+/*
+完成端口一
+*/
+//定义重叠IO结构，主要进行重叠操作
+typedef struct{
+	OVERLAPPED overlapped;
+	WSABUF WsaBuf;
+	char buffer[MSGSIZE];
+	DWORD RecvBytes;
+}MyOverData,*LPMyOverData;
+
+//定义套接字结构体
+typedef struct{
+	SOCKET s;
+	SOCKADDR_IN sockaddr;
+}MySockData,*LPMySockData;
+
+DWORD WINAPI ServerThread(LPVOID lpParam);
+int main()
+{
+	WSADATA wsaData;
+	SOCKET sListen,sAccept;
+	SOCKADDR_IN ServerAddr,ClientAddr;
+	HANDLE CompletionPort;
+	SYSTEM_INFO SystemInfo;
+	LPMyOverData lpmyoverdata;
+	LPMySockData lpmysockdata;
+	DWORD Flags=0;
+
+	//初始化套接字库
+	WSAStartup(MAKEWORD(2,2),&wsaData);
+
+	//创建完成端口
+	CompletionPort=CreateIoCompletionPort(INVALID_HANDLE_VALUE,NULL,0,0);
+
+	//获取系统信息
+	GetSystemInfo(&SystemInfo);
+
+	//创建线程池，线程个数为cpu核心数的2倍
+	for(UINT i=0;i<SystemInfo.dwNumberOfProcessors*2;i++)
+		CreateThread(NULL,0,ServerThread,(LPVOID)CompletionPort,NULL,NULL);
+
+	//创建套接字，绑定，监听
+	sListen=socket(AF_INET,SOCK_STREAM,0);
+	ServerAddr.sin_family=AF_INET;
+	ServerAddr.sin_addr.S_un.S_addr=htonl(INADDR_ANY);
+	ServerAddr.sin_port=htons(PORT);
+
+	bind(sListen,(SOCKADDR*)&ServerAddr,sizeof(SOCKADDR));
+	listen(sListen,5);
+
+	while(1)
+	{
+		int addrlen=sizeof(SOCKADDR);
+
+		//获取客户端套接字
+		sAccept=accept(sListen,(SOCKADDR*)&ClientAddr,&addrlen);
+
+		//为自定义结构体指针分配空间
+		lpmyoverdata=(LPMyOverData)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(MyOverData));
+		lpmysockdata=(LPMySockData)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(MySockData));
+
+		//给结构体赋值
+		lpmysockdata->s=sAccept;
+		lpmysockdata->sockaddr=ClientAddr;
+		lpmyoverdata->WsaBuf.len=MSGSIZE;
+		lpmyoverdata->WsaBuf.buf=lpmyoverdata->buffer;
+
+		//这里是该函数的第二个用途，将套接字和完成端口进行绑定，并将自定义的结构体作为完成键参数
+		CreateIoCompletionPort((HANDLE)sAccept,CompletionPort,(DWORD)lpmysockdata,0);
+		//进行重叠IO操作，使用自定义的重叠IO结构
+		WSARecv(lpmysockdata->s,&lpmyoverdata->WsaBuf,1,&lpmyoverdata->RecvBytes
+			,&Flags,&lpmyoverdata->overlapped,NULL);
+
+	}
+	return 0;
+}
+
+DWORD WINAPI ServerThread(LPVOID lpParam)
+{
+	//从线程参数中获得完成端口句柄
+	HANDLE CompletionPort=lpParam;
+
+	LPMyOverData lpmyoverdata;
+	LPMySockData lpmysockdata;
+	DWORD flags=0;
+	DWORD BytesTransfered;
+	while(1)
+	{
+		//等待函数，当IO完成后该函数将返回
+		GetQueuedCompletionStatus(CompletionPort,
+			&BytesTransfered,
+			(LPDWORD)&lpmysockdata,        //这个参数由CreateIoCompletionPort()函数的完成键参数确定
+			(LPOVERLAPPED*)&lpmyoverdata,  //这个参数由WSARecv()函数的lpOverlapped参数确定
+			INFINITE);
+
+		if(BytesTransfered==0)
+		{
+			//关闭链接
+			std::cout<<"closesocket "<<lpmysockdata->s<<endl;;
+			if(closesocket(lpmysockdata->s)==SOCKET_ERROR)
+			{
+				std::cout<<"close socket error "<<WSAGetLastError()<<endl;
+				return 0;
+			}
+			HeapFree(GetProcessHeap(),0,lpmysockdata);
+			HeapFree(GetProcessHeap(),0,lpmyoverdata);
+			continue;
+
+		}else
+		{
+			std::cout<<lpmyoverdata->buffer<<endl;
+			char ms[]="get message";
+			send(lpmysockdata->s,ms,sizeof(ms),0);
+		}
+
+		//重置变量 
+		flags=0;
+		memset(&lpmyoverdata->overlapped,0,sizeof(OVERLAPPED));
+		lpmyoverdata->WsaBuf.len=MSGSIZE;
+		lpmyoverdata->WsaBuf.buf=lpmyoverdata->buffer;
+
+		//继续对套接字进行重叠IO操作
+		WSARecv(lpmysockdata->s,&lpmyoverdata->WsaBuf,1,&lpmyoverdata->RecvBytes,
+			&flags,&lpmyoverdata->overlapped,NULL);
+	}
+}
