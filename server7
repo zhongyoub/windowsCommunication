@@ -1,0 +1,514 @@
+/*
+完成端口编程
+*/
+/*
+#include<iostream>
+#include <WinSock2.h>
+#include<MSWSock.h>
+#pragma comment(lib,"ws2_32.lib")
+
+//定义标识
+#define SEND 0
+#define RECV 1
+#define ACCEPT 2
+
+//定义缓冲区长度
+#define DATA_LENGTH 4096
+
+//定义socket结构体
+typedef struct{
+	SOCKET socket;
+	SOCKADDR_IN clientAddr;
+}PER_HANDLE_DATA,*LPPER_HANDLE_DATA;
+
+//定义重叠IO
+typedef struct{
+	OVERLAPPED overlapped;
+	WSABUF buffer;
+	char dataBuffer[DATA_LENGTH];
+	int dataLength;
+	int operatorType;          //判断重叠IO操作的类型
+	SOCKET client;
+}PER_IO_DATA,*LPPER_IO_DATA;
+
+//线程函数
+DWORD WINAPI ServerThread(LPVOID lpParam);
+
+//AcceptEx函数指针
+LPFN_ACCEPTEX lpfnAccpetEx=NULL;
+
+//创建GetAcceptExSockAdders函数指针
+LPFN_GETACCEPTEXSOCKADDRS lpfnGetAcceptExSockAddrs=NULL;
+int main()
+{
+	HANDLE CompletionPort;
+	WSADATA wsaData;
+	SYSTEM_INFO sysinfo;
+	SOCKADDR_IN addr;
+	SOCKET Listen;
+
+	//初始化套接字
+	WSAStartup(MAKEWORD(2,2),&wsaData);
+	//创建完成端口
+	CompletionPort=CreateIoCompletionPort(INVALID_HANDLE_VALUE,NULL,0,0);
+
+	//获取系统信息
+	GetSystemInfo(&sysinfo);
+	for(DWORD i=0;i<sysinfo.dwNumberOfProcessors*2;i++)
+	{
+		HANDLE thread=CreateThread(NULL,0,ServerThread,CompletionPort,0,NULL);
+		CloseHandle(thread);
+	}
+
+	//创建监听套接字
+	Listen=socket(AF_INET,SOCK_STREAM,0);
+
+	//创建完成键指针，用于绑定套接字
+	LPPER_HANDLE_DATA perHandleData;
+
+	//分配内存
+	perHandleData=(LPPER_HANDLE_DATA)(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(PER_HANDLE_DATA));
+
+	//将套接字分配给完成键成员
+	perHandleData->socket=Listen;
+
+	//将套接字和完成端口绑定
+	CreateIoCompletionPort((HANDLE)Listen,CompletionPort,
+		(ULONG_PTR)perHandleData,0);
+	addr.sin_addr.S_un.S_addr=INADDR_ANY;
+	addr.sin_family=AF_INET;
+	addr.sin_port=htons(6000);
+
+	//绑定监听
+	bind(Listen,(SOCKADDR*)&addr,sizeof(SOCKADDR));
+	listen(Listen,5);
+	
+	//定义GUID
+	GUID guidAcceptEx=WSAID_ACCEPTEX;
+	GUID GuidGetAcceptExSockAddrs=WSAID_GETACCEPTEXSOCKADDRS;
+	DWORD dwBytes=0;
+
+	
+	/*
+	int WSAIoctl (
+	SOCKET s,                                               //套接字句柄
+	DWORD dwIoControlCode,                                  //将进行操作的控制代码
+	LPVOID lpvInBuffer,                                     //输入缓冲区的地址
+	DWORD cbInBuffer,                                       //输入缓冲区的大小
+	LPVOID lpvOUTBuffer,                                    //输出缓冲区的地址
+	DWORD cbOUTBuffer,                                    //输出缓冲区的大小
+	LPDWORD lpcbBytesReturned,                              //输出实际字节数的地址
+	LPWSAOVERLAPPED lpOverlapped,                           //重叠IO结构体的指针
+	LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionROUTINE  //一个指向操作完成后调用的例程指针
+	);
+	*/
+	//动态获取AcceptEx函数指针
+/*	WSAIoctl(Listen,SIO_GET_EXTENSION_FUNCTION_POINTER,
+		&GuidGetAcceptExSockAddrs,
+		sizeof(GuidGetAcceptExSockAddrs),
+		&lpfnAccpetEx,
+		sizeof(lpfnAccpetEx),
+		&dwBytes,NULL,NULL);
+	
+	//动态获取GetAcceptExSockAddrs函数指针
+	WSAIoctl(Listen,
+		SIO_GET_EXTENSION_FUNCTION_POINTER,
+		&GuidGetAcceptExSockAddrs,
+		sizeof(GuidGetAcceptExSockAddrs),
+		&lpfnGetAcceptExSockAddrs,
+		sizeof(lpfnGetAcceptExSockAddrs),
+		&dwBytes,
+		NULL,NULL);
+
+	//创建重叠IO重叠结构体
+	LPPER_IO_DATA perIoData=(LPPER_IO_DATA)(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(PER_IO_DATA));
+	memset(perIoData,0,sizeof(PER_IO_DATA));
+
+	//将类型标识设为ACCEPT
+	perIoData->operatorType=ACCEPT;
+
+	//为客户端创建套接字
+	perIoData->client=socket(AF_INET,SOCK_STREAM,0);
+	perIoData->buffer.buf=perIoData->dataBuffer;
+	perIoData->buffer.len=perIoData->dataLength;
+	perIoData->dataLength=DATA_LENGTH;
+	DWORD flags=0;
+
+	//调用AccpetEx()函数，进行IO重叠
+	lpfnAccpetEx(Listen,            //监听套接字
+		perIoData->client,          //给未到来的客户端创建套接字
+		perIoData->dataBuffer,      //数据缓冲区的地址
+		perIoData->dataLength-(sizeof(SOCKADDR_IN)+16)*2,    //数据缓冲区中除去本地地址和远程地址的大小
+		sizeof(SOCKADDR_IN)+16,      //服务器本地地址的大小，在地址原有基础上多了16个字节
+		sizeof(SOCKADDR_IN)+16,      //客户端远程地址的大小，在地址原有基础上多了16个字节
+		&dwBytes,                    //实际接收数据的大小
+		&(perIoData->overlapped));   //重叠IO结构，进行重叠操作
+
+	//防止主线程结束
+	getchar();
+
+	//结束
+	closesocket(Listen);
+	WSACleanup();
+}
+
+//线程
+DWORD WINAPI ServerThread(LPVOID lpParam)
+{
+	//通过参数将完成端口传进来
+	HANDLE CompletionPort=lpParam;
+
+	//定义相关变量
+	DWORD bytes;
+	LPPER_HANDLE_DATA perHandleData=NULL;
+	LPPER_IO_DATA perIoData;
+	DWORD flags;
+	DWORD RecvBytes;
+	while(1)
+	{
+		//等待完成断就通知
+		GetQueuedCompletionStatus(CompletionPort,
+			&bytes,
+			(LPDWORD)&perHandleData,   //该参数由创建端口的完成键参数确定，里面包含套接字相关的信息
+			(LPOVERLAPPED*)&perIoData, //该参数由WSARecv()函数或AcceptEx()函数的lpOverlapped参数确定，里面包含数据缓冲区等信息
+			INFINITE);   
+
+		//出现错误
+		if(bytes==0&&(perIoData->operatorType==RECV||perIoData->operatorType==SEND))
+		{
+			closesocket(perHandleData->socket);
+			HeapFree(GetProcessHeap(),NULL,perHandleData);
+			HeapFree(GetProcessHeap(),NULL,perIoData);
+			continue;
+		}
+
+		//根据标识判断是否连接接入，ACCEPT
+		if(perIoData->operatorType==ACCEPT)
+		{
+			SOCKADDR_IN *ClientAddr=NULL;
+			SOCKADDR_IN *LocalAddr=NULL;
+			int remoteLen=sizeof(SOCKADDR_IN);
+			int LocalLen=sizeof(SOCKADDR_IN);
+
+			//获取客户端首次信息及客户端的地址信息
+			lpfnGetAcceptExSockAddrs(perIoData->dataBuffer,
+				perIoData->dataLength-(sizeof(SOCKADDR_IN)+16)*2,
+				sizeof(SOCKADDR_IN)+16,
+				sizeof(SOCKADDR_IN)+16,
+				(LPSOCKADDR*)&LocalAddr,         //服务器端地址
+				&LocalLen,
+				(LPSOCKADDR*)&ClientAddr,        //客户端地址
+				&remoteLen
+				);
+
+			//输出客户端的首次信息
+			std::cout<<"from "<<inet_ntoa(ClientAddr->sin_addr)
+				<<" "<<ntohs(ClientAddr->sin_port)<<":"
+				<<perIoData->dataBuffer<<std::endl;
+			
+			//给客户端发送消息表示收到信息
+			char firstmesg[]="服务器第一次好到消息";
+			send(perIoData->client,firstmesg,sizeof(firstmesg),0);
+
+			//创建新的socket结构体，是获取到的客户端socket和完成端口绑定
+			LPPER_HANDLE_DATA pNewper_handle_data=(LPPER_HANDLE_DATA)(LPPER_HANDLE_DATA)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PER_HANDLE_DATA));
+
+			//将客户端套接字相关信息存到该结构体中，用来作为完成键
+			pNewper_handle_data->socket=perIoData->client;
+			//
+			memcpy(&(pNewper_handle_data->clientAddr),ClientAddr,sizeof(SOCKADDR_IN));    
+
+			//将客户端socket和完成端口绑定
+			CreateIoCompletionPort((HANDLE)pNewper_handle_data->socket,CompletionPort,(DWORD)pNewper_handle_data,0);
+	        
+			//创建新的重叠IO结构，对获取的客户端socket投递RECV消息
+			LPPER_IO_DATA pNewIoData=(LPPER_IO_DATA)(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(LPPER_IO_DATA));
+
+			//客户端连接进来，等待客户端发送信息，而服务器端接收消息，设置标识RECV
+			pNewIoData->operatorType=RECV;
+			DWORD dwFlags=0;
+			DWORD dwBytes=0;
+			pNewIoData->buffer.buf=pNewIoData->dataBuffer;
+			pNewIoData->buffer.len=pNewIoData->dataLength=DATA_LENGTH;
+			pNewIoData->client=pNewper_handle_data->socket;
+
+			//对客户端套接字进行重叠IO操作
+			WSARecv(pNewIoData->client,
+				&(pNewIoData->buffer),
+				1,
+				&dwBytes,
+				&dwFlags,
+				&pNewIoData->overlapped,
+				NULL
+				);
+			//给服务器端监听套接字的相关结构初始化，方便对监听socket进行ACCEPT投递
+			memset(perIoData->dataBuffer,0,DATA_LENGTH);
+
+			//监听套接字任务是监听，因此继续设置其标识为ACCEPT
+			perIoData->operatorType=ACCEPT;
+			perIoData->client=socket(AF_INET,SOCK_STREAM,0);
+
+			//对服务器监听套接字进行重叠IO操作，继续等待下一个客户端套接字接入
+			lpfnAccpetEx(perHandleData->socket,
+				perIoData->client,
+				perIoData->dataBuffer,
+				perIoData->dataLength-(sizeof(SOCKADDR_IN)+16)*2,
+				sizeof(SOCKADDR_IN)+16,
+				sizeof(SOCKADDR_IN)+16,
+				&dwBytes,
+				&(perIoData->overlapped)
+				);
+			continue;
+
+		}
+		//如果标识是RECV,做数据接收处理
+		if(perIoData->operatorType==RECV)
+		{
+			std::cout<<perIoData->dataBuffer<<std::endl;
+
+			//给客户端发送信息表示收到
+			char sendBuf[]="get message";
+			send(perHandleData->socket,sendBuf,sizeof(sendBuf),0);
+
+			//对相关变量重新初始化
+			flags=0;
+			perIoData->operatorType=RECV;
+			memset(&(perIoData->overlapped),0,sizeof(OVERLAPPED));
+
+			WSARecv(perHandleData->socket,
+				&perIoData->buffer,
+				1,
+				&RecvBytes,
+				&flags,
+				&(perIoData->overlapped),
+				NULL
+				);
+			continue;
+		}
+	}
+	return 0;
+}   */
+
+#include <stdio.h>
+#include <WinSock2.h>
+#include <MSWSock.h>
+#pragma comment(lib,"ws2_32.lib")
+//定义标识
+#define SEND 0
+#define RECV 1
+#define ACCEPT 2
+//定义缓冲区长度
+#define DATA_LENGTH 4096
+//定义socket结构体，用来作为完成键
+typedef struct {
+	SOCKET socket;
+	SOCKADDR_IN clientAddr;
+}PER_HANDLE_DATA, *LPPER_HANDLE_DATA;
+//定义重叠IO
+typedef struct {
+	OVERLAPPED overlapped;
+	WSABUF buffer;
+	char dataBuffer[DATA_LENGTH];
+	int dataLength;
+	int operatorType;             //该成员就是帮助我们判断的标识
+	SOCKET client;
+}PER_IO_DATA, *LPPER_IO_DATA;
+//线程函数
+DWORD WINAPI ServerThread(LPVOID lpParam);
+//创建全局AcceptEx函数指针
+LPFN_ACCEPTEX lpfnAcceptEx = NULL;
+//创建全局GetAcceptExSockAddrs函数指针
+LPFN_GETACCEPTEXSOCKADDRS lpfnGetAcceptExSockAddrs = NULL;
+int main(){
+
+	//定义相关变量
+	HANDLE CompletionPort;
+	WSADATA wsaData;
+	SYSTEM_INFO sysinfo;
+	SOCKADDR_IN addr;
+	SOCKET Listen;
+
+	//初始化套接字
+	WSAStartup(MAKEWORD(2, 2), &wsaData);
+	//创建完成端口
+	CompletionPort = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 0);
+
+	//获取系统信息，根据CPU数量创建服务线程个数
+	GetSystemInfo(&sysinfo);
+	for (DWORD i = 0; i < sysinfo.dwNumberOfProcessors * 2; i++){
+		HANDLE thread = CreateThread(NULL, 0, ServerThread, CompletionPort, 0, NULL);
+		CloseHandle(thread);
+	}
+	//创建监听套接字
+	Listen = socket(AF_INET, SOCK_STREAM, 0);
+
+	//创建完成键指针，用来绑定套接字
+	LPPER_HANDLE_DATA perHandleData;
+	//分配内存
+	perHandleData = (LPPER_HANDLE_DATA)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PER_HANDLE_DATA));
+	//将套接字分配给完成键成员
+	perHandleData->socket = Listen;
+	//将套接字和完成端口绑定
+	CreateIoCompletionPort((HANDLE)Listen, CompletionPort, (ULONG_PTR)perHandleData, 0);
+	addr.sin_addr.S_un.S_addr = INADDR_ANY;
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(6000);
+
+	//开始监听
+	bind(Listen, (SOCKADDR*)&addr, sizeof(SOCKADDR));
+	listen(Listen, 5);
+	//定义GUID
+	GUID guidAcceptEx = WSAID_ACCEPTEX;
+	GUID GuidGetAcceptExSockAddrs = WSAID_GETACCEPTEXSOCKADDRS;
+	DWORD dwBytes = 0;
+	//动态获取AcceptEx函数指针
+	WSAIoctl(Listen, 
+		SIO_GET_EXTENSION_FUNCTION_POINTER,
+		&guidAcceptEx, 
+		sizeof(guidAcceptEx), 
+		&lpfnAcceptEx,
+		sizeof(lpfnAcceptEx), 
+		&dwBytes, 
+		NULL, 
+		NULL);
+
+	//动态获取GetAcceptExSockAddrs函数指针
+	WSAIoctl(Listen, 
+		SIO_GET_EXTENSION_FUNCTION_POINTER, 
+		&GuidGetAcceptExSockAddrs,
+		sizeof(GuidGetAcceptExSockAddrs), 
+		&lpfnGetAcceptExSockAddrs,
+		sizeof(lpfnGetAcceptExSockAddrs), 
+		&dwBytes, 
+		NULL, 
+		NULL);
+	//创建重叠IO结构体
+	LPPER_IO_DATA perIoData = (LPPER_IO_DATA)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PER_IO_DATA));
+	memset((void*)perIoData, 0, sizeof(PER_IO_DATA));
+
+	//该成员设置标识为ACCEPT，方便我们在服务线程中进行判断
+	perIoData->operatorType = ACCEPT;
+	//先为客户端创建套接字
+	perIoData->client = socket(AF_INET, SOCK_STREAM, 0);
+	perIoData->buffer.buf = perIoData->dataBuffer;
+	perIoData->buffer.len = perIoData->dataLength;
+	perIoData->dataLength = DATA_LENGTH;
+	DWORD flags = 0;
+	//调用AcceptEx()函数，同时进行IO重叠
+	lpfnAcceptEx(Listen,                                          //监听套接字
+		perIoData->client,                                        //为还未到来的客户端创建的套接字
+		perIoData->dataBuffer,                                    //数据缓冲区的地址
+		perIoData->dataLength - ((sizeof(SOCKADDR_IN)+16) * 2),   //数据缓冲区中除去本地地址和远程地址的大小
+		sizeof(SOCKADDR_IN)+16,                                   //服务器本地地址的大小，这里在地址原有基础上多了16字节
+		sizeof(SOCKADDR_IN)+16,                                   //客户端远程地址的大小，这里在地址原有基础上多了16字节
+		&dwBytes,                                                 //实际接收数据的大小
+		&(perIoData->overlapped)                                  //重叠IO结构，用来进行重叠操作
+		);
+
+	//防止主线程结束，这里处理比较拙略
+	getchar();
+	//扫尾
+	closesocket(Listen);
+	WSACleanup();
+}
+//服务线程
+DWORD WINAPI ServerThread(LPVOID lpParam){
+	//完成端口通过参数传递进来
+	HANDLE CompletionIoPort = (HANDLE)lpParam;
+	//定义相关变量
+	DWORD bytes;
+	LPPER_HANDLE_DATA perHandleData = NULL;
+	LPPER_IO_DATA perIoData;
+	DWORD Flags;
+	DWORD RecvBytes;
+	while (1){
+		//等待完成端口通知
+		GetQueuedCompletionStatus(CompletionIoPort, 
+			&bytes, 
+			(LPDWORD)&perHandleData,    //该参数由创建端口的完成键参数确定，里面包含套接字相关的信息
+			(LPOVERLAPPED*)&perIoData,  //该参数由WSARecv()函数或AcceptEx()函数的lpOverlapped参数确定，里面包含数据缓冲区等信息
+			INFINITE); 
+
+		//发生错误
+		if (bytes == 0 && (perIoData->operatorType == RECV || perIoData->operatorType == SEND)){
+
+			//扫尾
+			closesocket(perHandleData->socket);
+			HeapFree(GetProcessHeap(), NULL, perHandleData);
+			HeapFree(GetProcessHeap(), NULL, perIoData);
+			continue;
+		}
+		//根据标识判断是连接接入，因此作ACCEPT处理
+		if (perIoData->operatorType == ACCEPT){
+			SOCKADDR_IN *ClientAddr = NULL;
+			SOCKADDR_IN *LocalAddr = NULL; 
+			int remoteLen = sizeof(SOCKADDR_IN);
+			int LocalLen = sizeof(SOCKADDR_IN);
+
+			//获取客户端的首次消息以及客户端的地址信息
+			lpfnGetAcceptExSockAddrs(perIoData->dataBuffer,              //数据缓冲区地址
+				perIoData->dataLength - ((sizeof(SOCKADDR_IN)+16) * 2),
+				sizeof(SOCKADDR_IN)+16, 
+				sizeof(SOCKADDR_IN)+16, 
+				(LPSOCKADDR*)&LocalAddr,                                 //服务端本地地址的地址
+				&LocalLen,
+				(LPSOCKADDR*)&ClientAddr,                                //客户端远程地址的地址
+				&remoteLen);
+			//输出客户端的首次消息
+			printf("From %s:%d  :%s\n", inet_ntoa(ClientAddr->sin_addr),ntohs(ClientAddr->sin_port),perIoData->dataBuffer);
+			//给客户端发送消息表示收到消息
+			char firstmsg[] = "服务端第一次收到消息";
+			send(perIoData->client, firstmsg, sizeof(firstmsg), 0);
+			//创建新的socket结构体，使获取到的客户端socket和完成端口绑定
+			LPPER_HANDLE_DATA pNewper_handle_data = (LPPER_HANDLE_DATA)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PER_HANDLE_DATA));
+
+			//将客户端套接字的相关信息存到该结构体中，用来作完成键
+			pNewper_handle_data->socket = perIoData->client;
+			memcpy(&(pNewper_handle_data->clientAddr), ClientAddr, sizeof(SOCKADDR_IN));
+			//将客户端socket和完成端口绑定
+			CreateIoCompletionPort((HANDLE)(pNewper_handle_data->socket), CompletionIoPort, (DWORD)pNewper_handle_data, 0);
+
+			//创建新的重叠IO结构，对获取的客户端socket投递RECV消息
+			LPPER_IO_DATA pNewIoData =(LPPER_IO_DATA) HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(PER_IO_DATA));
+
+			//客户端连接进来了，那么接下来就是等待客户端发送消息，而服务端这时候要接收消息了，设定标识为RECV
+			pNewIoData->operatorType = RECV;
+			DWORD dwFlags = 0;
+			DWORD dwBytes = 0;
+			pNewIoData->buffer.buf = pNewIoData->dataBuffer;
+			pNewIoData->buffer.len = pNewIoData->dataLength = DATA_LENGTH;
+			pNewIoData->client = pNewper_handle_data->socket;
+			//对客户端套接字进行重叠IO操作
+			WSARecv(pNewIoData->client, &(pNewIoData->buffer), 1, &dwBytes, &dwFlags, &(pNewIoData->overlapped), NULL);
+			//给服务器监听套接字的相关结构重新初始化，方便对监听socket进行ACCEPT投递
+			memset((void*)&(perIoData->dataBuffer), 0, DATA_LENGTH);
+			//监听套接字的任务还是监听，因此继续设置其标识为ACCEPT
+			perIoData->operatorType = ACCEPT;
+			perIoData->client = socket(AF_INET, SOCK_STREAM, 0);
+			//对服务器监听套接字进行重叠IO操作，以继续等待下一个客户端套接字连入
+			lpfnAcceptEx(perHandleData->socket, perIoData->client, &(perIoData->dataBuffer), perIoData->dataLength - ((sizeof(SOCKADDR_IN)+16) * 2),
+				sizeof(SOCKADDR_IN)+16, sizeof(SOCKADDR_IN)+16, &dwBytes, &(perIoData->overlapped));
+
+			//继续循环
+			continue;
+		}
+		//根据表示判断是RECV，因此作数据接收处理
+		if (perIoData->operatorType == RECV){
+			//输出消息
+			printf("%s\n", perIoData->dataBuffer);
+			//给客户端发送消息表示收到消息
+			char sendBuf[] = "收到消息";
+			send(perHandleData->socket, sendBuf, sizeof(sendBuf), 0);
+			//对相关变量重新初始化
+			Flags = 0;
+			perIoData->operatorType = RECV;
+			memset((void*)&(perIoData->overlapped), 0, sizeof(OVERLAPPED));
+			//重新对客户端套接字进行重叠IO操作
+			WSARecv(perHandleData->socket, &(perIoData->buffer), 1, &RecvBytes, &Flags, &(perIoData->overlapped), NULL);
+
+			//继续循环
+			continue;
+		}
+	}
+	return 0;
+}
