@@ -1,0 +1,96 @@
+/*
+同步网络通信
+*/
+
+#include<iostream>
+#include<WinSock2.h>
+#pragma  comment(lib,"ws2_32.lib")
+using namespace std;
+/*
+多线程处理多个客户端,同步机制
+*/
+DWORD WINAPI clientThread(LPVOID lpParam);
+void main()
+{
+	WSAData wsaData;
+	WORD wVersionRequested;
+	SOCKET socketListen,socketCon;
+	SOCKADDR_IN listenAddr,connAddr;
+//	char sendBuf[1024];
+//	char recvBuf[1024];
+//	char temp[2048];
+	int err=0;
+	wVersionRequested=MAKEWORD(2,2);
+	//初始化套接字库
+	err=WSAStartup(wVersionRequested,&wsaData);
+	if(err!=0)
+		return;
+
+	//创建套接字
+	socketListen=socket(AF_INET,SOCK_STREAM,0);
+	if(INVALID_SOCKET==socketListen)
+		cout<<"创建套接字失败\n";
+	listenAddr.sin_addr.S_un.S_addr=htonl(INADDR_ANY);
+	listenAddr.sin_family=AF_INET;
+	listenAddr.sin_port=htons(6000);
+	//绑定套接字
+	if(SOCKET_ERROR==bind(socketListen,(SOCKADDR*)&listenAddr,sizeof(SOCKADDR)))
+	{
+		cout<<"绑定套接字失败\n";
+	}
+	//设置监听
+	if(SOCKET_ERROR==listen(socketListen,5))
+	{
+		cout<<WSAGetLastError()<<endl;
+	}
+//	memset(sendBuf,0,sizeof(sendBuf));
+//	memset(recvBuf,0,sizeof(recvBuf));
+//	memset(temp,0,sizeof(recvBuf));
+	//接收
+	int len=sizeof(connAddr);
+//	socketCon=accept(socketListen,(SOCKADDR*)&connAddr,&len);
+	while(1)
+	{
+/*		recv(socketCon,recvBuf,sizeof(recvBuf),0);
+		sprintf(temp,"From %s:\n%s\n",inet_ntoa(connAddr.sin_addr),recvBuf);
+		cout<<temp;
+		cout<<"please input the message:\n";
+//		gets(sendBuf);
+		cin.getline(sendBuf,sizeof(sendBuf));
+		send(socketCon,sendBuf,strlen(sendBuf)+1,0);   */
+		socketCon=accept(socketListen,(SOCKADDR*)&connAddr,&len);
+		//每接收一个链接，就创建一个线程来处理相应的消息
+		CreateThread(NULL,0,clientThread,(LPVOID)socketCon,NULL,NULL);
+	}
+	closesocket(socketCon);
+	closesocket(socketListen);
+	WSACleanup();
+}
+DWORD WINAPI clientThread(LPVOID lpParam)
+{
+	SOCKET ss=(SOCKET)lpParam;
+	int retVal;
+	char recvBuf[1024];
+	char sendBuf[1024];
+//	char sendBuf[]="收到消息";
+//	char tempBuf[2048];
+	memset(recvBuf,0,sizeof(recvBuf));
+	memset(sendBuf,0,sizeof(sendBuf));
+//	memset(tempBuf,0,sizeof(tempBuf));
+	while(1){
+		//接收消息
+		retVal=recv(ss,recvBuf,sizeof(recvBuf),0);
+		//判断客户端是否关闭连接
+		if(SOCKET_ERROR==retVal){
+			printf("recv failed !\n");
+			break;
+		}
+		printf("%s\n",recvBuf);
+		//这里发送的信息固定成“收到消息”了
+		cout<<"please input message:\n";
+		cin.getline(sendBuf,sizeof(sendBuf));
+		send(ss,sendBuf,sizeof(sendBuf),0);
+	}
+	closesocket(ss);
+	return 0;
+}
