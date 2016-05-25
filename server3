@@ -1,0 +1,168 @@
+#include<WinSock2.h>
+#include<iostream>
+#pragma  comment(lib,"ws2_32.lib")
+/*
+事件通知的重叠I/O
+*/
+#define MEGSIZE 2014
+#define PORT 6000
+using std::cout;
+using std::cin;
+//(1)定义使用的变量
+typedef struct{
+	WSAOVERLAPPED overlap;
+	WSABUF Buffer;
+	DWORD NumberOfBytesRecevd;
+	DWORD Flags;
+}IO_OVERDATA;
+int connectNum=0;
+
+//创建全局socket，事件以及重叠结构的数组，数组的大小都是MAXIMUM_WAIT_OBJECTS宏确定的，该宏代表的大小是64，这也是限制
+SOCKET MySockets[MAXIMUM_WAIT_OBJECTS];
+WSAEVENT MyEvents[MAXIMUM_WAIT_OBJECTS];
+IO_OVERDATA *MyOverData[MAXIMUM_WAIT_OBJECTS];
+
+//定义线程函数
+DWORD WINAPI ServerThread(LPVOID lpParam);
+
+//定义清理函数
+void Cleanup(int);
+
+int main()
+{
+	//(2)创建套接字，并在指定的端口监听请求
+	//初始化套接字
+	WSADATA wsaData;
+	SOCKET sListen,sClient;
+	SOCKADDR_IN localaddr={0},clientaddr={0};
+	WSAStartup(MAKEWORD(2,2),&wsaData);
+
+	//创建套接字
+	sListen=socket(AF_INET,SOCK_STREAM,0);
+	localaddr.sin_addr.S_un.S_addr=INADDR_ANY;
+	localaddr.sin_family=AF_INET;
+	localaddr.sin_port=htons(PORT);
+
+	//绑定套接字
+	bind(sListen,(SOCKADDR*)&localaddr,sizeof(SOCKADDR));
+
+	//监听
+	listen(sListen,5);
+
+	//创建线程
+	CreateThread(NULL,0,ServerThread,NULL,NULL,NULL);
+
+	while(1)
+	{
+		int addressLen=sizeof(SOCKADDR);
+		//获得客户端的连接套接字或客户端的信息存放在clientaddr
+		//(3)接收客户端的连接请求
+		sClient=accept(sListen,(SOCKADDR*)&clientaddr,&addressLen);
+
+		//(4)初始化重叠结构
+		//将客户端套接字添加sock数组
+		MySockets[connectNum]=sClient;
+		//创建一个自定义的结果并添加进全局数组
+		MyOverData[connectNum]=(IO_OVERDATA*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,sizeof(IO_OVERDATA));
+		//指定缓冲区的大小
+		MyOverData[connectNum]->Buffer.len=MEGSIZE;
+
+		//给缓冲区分配空间
+		MyOverData[connectNum]->Buffer.buf=(char*)HeapAlloc(GetProcessHeap(),HEAP_ZERO_MEMORY,	MEGSIZE);
+
+		//为客户端的套接字创建事件对象
+		MyOverData[connectNum]->overlap.hEvent=WSACreateEvent();   
+	
+	    //将事件对象添加进事件对象数组
+		MyEvents[connectNum]=MyOverData[connectNum]->overlap.hEvent;
+
+		//(5)在套接字上投递Recv请求
+		//对套接字进行重叠操作
+		WSARecv(sClient,&MyOverData[connectNum]->Buffer,1,
+			&MyOverData[connectNum]->NumberOfBytesRecevd,
+			&MyOverData[connectNum]->Flags,&MyOverData[connectNum]->overlap,NULL);
+
+		//连接数量自增
+		connectNum++;
+	}
+	closesocket(sListen);
+	WSACleanup();
+	return 0;
+
+}
+
+DWORD WINAPI ServerThread(LPVOID lpParam)
+{
+	//创建相关变量
+	int ret,index;
+	DWORD cbTransferred=0;
+	while(1){
+		//(6)用WSAWaitForMultipleEvents函数等待重叠操作返回的结果
+		//等待相关事件被设置为有信号状态
+		ret=WSAWaitForMultipleEvents(connectNum,MyEvents,FALSE,1000,FALSE);
+
+		//判断是否发生错误（7）
+		if(ret==WSA_WAIT_FAILED || ret==WSA_WAIT_TIMEOUT){
+			if(connectNum==0)
+				Sleep(1000);
+			continue;
+		}
+
+		//获取对象在各个数组中的下标，这里的返回值ret不是不是事件在数组中的Index,需要减去WSA_WAIT_EVENT_0
+		index=ret-WSA_WAIT_EVENT_0;
+
+		//(7)使用WSAResetEvent函数重设当前这个用完的事件对象
+		//重置事件对象，将事件对象设置成无信号状态，给下一次使用
+		WSAResetEvent(MyEvents[index]);
+		
+		//(8)使用WSAGetOverlappedResult函数取得重叠调用的返回状态
+		//获取在套接字上IO重叠操作的结果
+		WSAGetOverlappedResult(MySockets[index],&MyOverData[index]->overlap,
+			&cbTransferred,TRUE,&MyOverData[index]->Flags);
+
+		//接收或发送的字节数为0，表示发生错误
+		if(cbTransferred==0){
+
+			//该函数用来销毁没有发送数据的套接字以及相关结构
+			Cleanup(index);
+		}
+		else{
+			//(9)处理数据
+			//此处处理数据，在此作输出处理
+			printf("%s\n",MyOverData[index]->Buffer.buf);
+			memset(MyOverData[index]->Buffer.buf,0,MyOverData[index]->Buffer.len);
+
+			//若是发送数据可在此处
+			send(MySockets[index],"收到消息",strlen("收到消息")+1,0);
+			
+			//(11)重读6-10
+			//继续对套接字进行重叠操作，并立即返回
+			WSARecv(MySockets[index],&MyOverData[index]->Buffer,1,
+				&MyOverData[index]->NumberOfBytesRecevd,
+				&MyOverData[index]->Flags,
+				&MyOverData[index]->overlap,
+				NULL);
+	//		cout<<MyOverData[index]->Buffer.buf;
+		}
+	}
+	return 0;
+}
+//清理函数
+void Cleanup(int index){
+	//关闭套接字
+	closesocket(MySockets[index]);
+	//关闭事件对象
+	WSACloseEvent(MyEvents[index]);
+	//释放空间
+	HeapFree(GetProcessHeap(),0,MyOverData[index]->Buffer.buf);
+	HeapFree(GetProcessHeap(),0,MyOverData[index]);
+	//将相关变量从全局数组中移除
+	if(index<connectNum-1){
+		MySockets[index]=MySockets[connectNum-1];
+		MyEvents[index]=MyEvents[connectNum-1];
+		MyOverData[index]=MyOverData[connectNum-1];
+	}
+	UINT temp=--connectNum;
+	MyOverData[temp]=NULL;
+
+}
